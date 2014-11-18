@@ -1,0 +1,205 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+no if $] >= 5.017011, warnings => 'experimental::smartmatch';
+use Getopt::Std;
+use List::Util "min";
+
+#------------------------------------------------------------------------------+
+# Six Degrees of Wikipedia V1.0                                                |
+#------------------------------------------------------------------------------+
+
+# globals -- options
+my %opts = ();
+
+# version numbering
+my $version = {
+  'major' => 1,
+  'minor' => 0
+};
+
+# command line commands
+my $debug;
+my $cmd;
+my $gstate = {};
+
+# the wikigraph -- the library of everything
+my $wikigraph = {};
+
+# regular expressions
+my $regex_link = qr/href="\/wiki\/([\w_,]+)"/;
+
+my $regex_article = qr/[\w\d_,.()]+/;
+my $regex_cmd     = qr/(\w+) (\w+)/;
+
+# Article blacklist
+# NOTE: MAKE THIS ADHERE TO A GRADIENCE OF STRICTNESS
+my @blacklist = (
+  'Main_Page',
+  'International_Standard_Book_Number',
+  'International_Standard_Name_Identifier',
+  'Internet_Movie_Database',
+  'Virtual_International_Authority_File'
+);
+
+#------------------------------------------------------------------------------+
+# Helper Subroutines                                                           |
+#------------------------------------------------------------------------------+
+sub msg_gen ($$$)
+{
+  my ($dflag, $tag, $msg) = @_;
+  if ($dflag) {
+    substr($msg, min(37, length($msg))) = '';
+    printf("# %36s : %-37s #\n", $tag, $msg);
+  }
+}
+sub msg       ($$) { msg_gen(1      , shift, shift); }
+sub debug_msg ($$) { msg_gen($debug , shift, shift); }
+
+sub get_version () 
+{
+  return "$version->{'major'}.$version->{'minor'}";
+}
+
+#------------------------------------------------------------------------------+
+# Reset global state machine to defaults                                       |
+#------------------------------------------------------------------------------+
+sub reset_gstate ()
+{
+  $gstate = {
+    'first_pass'  => 0,
+    'dirty_links' => 0,
+    'running'     => 0
+  };
+}
+
+#------------------------------------------------------------------------------+
+# Wikipedia Article Processing Subroutines                                     |
+#------------------------------------------------------------------------------+
+
+# create a new article node 
+sub new_article_node ()
+{
+  return {
+    'fetched'   => 0,
+    'sources'   => 0,
+    'touchedby' => undef,
+    'links'     => ()
+  };
+}
+
+# extract links from an article
+sub scrape_article ($)
+{
+  my ($slug)  = @_;
+  my @results = ();
+
+  # The scraping itself
+  my $data = `curl -s "http://en.wikipedia.org/wiki/$slug"`;
+  while ($data =~ m/${regex_link}/g) {
+    # exclude terms in the blacklist -- NOTE: PERL 5.10+ REQUIRED!
+    # IF THIS IS A PROBLEM, SUBMIT AN ISSUE!
+    next if ($1 ~~ @blacklist);
+    # exclude dupes
+    next if ($1 ~~ @results);
+    # exclude self
+    next if ($1 eq $slug);
+    push(@results, $1);
+  }
+
+  # debug printing
+  map {debug_msg('FOUND LINK', $_);} sort(@results);
+}
+
+# Insert links into the graph
+sub wikigraph_insert ($$)
+{
+  my ($toucher, $key) = @_;
+
+  # touch article if it's not there
+  $wikigraph->{$key} = new_article_node() if (!exists($wikigraph->{$key}));
+  $wikigraph->{$key}->{'touchedby'} = $toucher;
+
+  my @links = @{$wikigraph->{$key}->{'links'}};
+  push(@links, $toucher) unless ($toucher ~~ @links);
+}
+
+sub pseudo_dijkstra ($$)
+{
+  my ($source, $sink) = @_;
+
+  while (!exists($wikigraph->{$sink})) {
+    # Do page-rank
+    msg('LOCAL', 're-ranking articles');
+    my $page_rank = {};
+    map {
+      my $entry   = $wikigraph->{$_};
+      my $sources = $entry->{'sources'};
+      $page_rank->{$sources} = () unless (exists($page_rank->{$sources}));
+      push(@{$page_rank->{$sources}}, $entry) if ($entry->{'fetched'} == 0);
+    } keys(%{$wikigraph});
+
+    # rank by descending link total
+    # foreach my $ka (sort {$b <=> $a} keys(%{page_rank})) {
+    #   
+    # }
+  }
+}
+
+#------------------------------------------------------------------------------+
+# Main Subroutines                                                             |
+#------------------------------------------------------------------------------+
+
+# Valid command dictionary
+my $cmd_dict = {
+  'debug'  => sub ($) { $debug = shift eq 'on' ? 1 : 0; },
+  'scrape' => sub ($) { scrape_article(shift);          },
+  'source' => sub ($) { },
+  'sink'   => sub ($) { }
+};
+
+sub dispatch_command ($$)
+{
+  my ($cmd, $val) = @_;
+  # invoke the command or show non-existence error
+  my $kexists = exists($cmd_dict->{$cmd});
+  &{$cmd_dict->{$cmd}}($val)      if ($kexists);
+  msg('ERROR', 'unknown command') unless ($kexists);
+}
+
+sub main ()
+{
+  # invoke getopts
+  getopts("d", \%opts);
+
+  $debug = defined($opts{'d'}) ? 1 : 0;
+  msg('DEBUG', $debug);
+
+  msg('','');
+  msg('SIX DEGREES', 'OF WIKIPEDIA');
+  msg('VERSION', get_version());
+  debug_msg('DEBUG MODE', 'ON');
+  msg('','');
+  print("\n");
+
+  do {
+    # clean slate
+    reset_gstate();
+
+    # get command from prompt
+    print("wiki > ");
+    chomp($cmd = <>);
+
+    # pull apart command
+    debug_msg("COMMAND", "$1 <- $2") if ($cmd =~ /${regex_cmd}/);
+
+    # dispatch command
+    msg('ERROR', 'invalid command') unless (defined($1) && defined($2));
+    dispatch_command($1, $2)        if (defined($1) && defined($2));
+
+  } while(lc($cmd) ne 'quit');
+
+  msg('QUITTING', 'GOODBYE!');
+}
+main();
